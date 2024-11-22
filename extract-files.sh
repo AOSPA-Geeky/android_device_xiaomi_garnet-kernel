@@ -1,142 +1,91 @@
 #!/bin/bash
+#
+# Copyright (C) 2023 Paranoid Android
+#
+# SPDX-License-Identifier: Apache-2.0
+#
 
 set -e
 
-EXTRACT_OTA=../../../prebuilts/extract-tools/linux-x86/bin/ota_extractor
+### Setup
+DUMP=
+MY_DIR="${BASH_SOURCE%/*}"
+SRC_ROOT="${MY_DIR}/../../.."
 MKDTBOIMG=../../../system/libufdt/utils/src/mkdtboimg.py
-UNPACKBOOTIMG=../../../system/tools/mkbootimg/unpack_bootimg.py
-ROM_ZIP=$1
+TMP_DIR=$(mktemp -d)
+EXTRACT_KERNEL=true
+declare -a MODULE_FOLDERS=("vendor_ramdisk" "vendor_dlkm")
 
 declare -a DTBO_PANEL_PATCHES=(
-    "Garnet:dsi_n16_41_02_0c_dsc_vid" 
+    "Garnet:dsi_n16_41_02_0c_dsc_vid"
     "Garnet:dsi_n16_42_02_0b_dsc_vid"
     "Garnet:dsi_n16_36_0d_0a_dsc_vid"
 )
 
-error_handler() {
-    if [[ -d $extract_out ]]; then
-        echo "Error detected, cleaning temporal working directory $extract_out"
-        rm -rf $extract_out
-    fi
-}
-
-trap error_handler ERR
-
-function usage() {
-	echo "Usage: ./extract-files.sh <rom-zip>"
-	exit 1
-}
-
-function get_path() {
-	echo "$extract_out/$1"
-}
-
-function mkdtboimg() {
+mkdtboimg() {
 	$MKDTBOIMG $@
 }
 
-function unpackbootimg() {
-	$UNPACKBOOTIMG $@
-}
-
-function extract_ota() {
-    $EXTRACT_OTA $@
-}
-
-if [[ ! -f $UNPACKBOOTIMG ]]; then
-	echo "Missing $UNPACKBOOTIMG, are you on the correct directory?"
-	exit 1
-fi
-
-if [[ ! -f $EXTRACT_OTA ]]; then
-	echo "Missing $EXTRACT_OTA, are you on the correct directory and have built the ota_extractor target?"
-	exit 1
-fi
-
-if [[ -z $ROM_ZIP ]] || [[ ! -f $ROM_ZIP ]]; then
-	usage
-fi
-
-# Create needed directories
-for dir in ./modules/dlkm ./modules/ramdisk ./images ./images/dtbs; do
-    rm -rf $dir
-    mkdir -p $dir
+while [ "${#}" -gt 0 ]; do
+    case "${1}" in
+        -n | --no-kernel )
+                EXTRACT_KERNEL=false
+                ;;
+        * )
+                DUMP="${1}"
+                ;;
+    esac
+    shift
 done
 
-# Extract the OTA package
-extract_out=$(mktemp -d)
-echo "Using $extract_out as working directory"
+# Check if dump is specified and exists
+if [ -z "${DUMP}" ]; then
+    echo "Please specify the dump!"
+    exit 1
+elif [ ! -d "${DUMP}" ]; then
+    echo "Unable to find dump at ${DUMP}!"
+    exit 1
+fi
 
-echo "Extracting the payload from $ROM_ZIP"
-unzip $ROM_ZIP payload.bin -d $extract_out
+echo "Extracting files from ${DUMP}:"
 
-echo "Extracting OTA images"
-extract_ota -payload $extract_out/payload.bin -output_dir $extract_out -partitions boot,dtbo,vendor_boot,vendor_dlkm
+### Kernel
+if ${EXTRACT_KERNEL}; then
+    echo "Extracting boot image.."
+    ${SRC_ROOT}/system/tools/mkbootimg/unpack_bootimg.py \
+        --boot_img "${DUMP}/boot.img" \
+        --out "${TMP_DIR}/boot.out" > /dev/null
+    cp -f "${TMP_DIR}/boot.out/kernel" ${MY_DIR}/Image
+    echo "  - Image"
+fi
 
-# BOOT
-echo "Extracting the kernel image from boot.img"
-out=$extract_out/boot-out
-mkdir $out
+### DTBS
+# Cleanup / Preparation
+rm -rf "${MY_DIR}/dtbs"
+mkdir "${MY_DIR}/dtbs"
 
-echo "Extracting at $out"
-unpackbootimg --boot_img $(get_path boot.img) --out $out --format mkbootimg
-
-echo "Done. Copying the kernel"
-cp $out/kernel ./images/kernel
-echo "Done"
-
-# VENDOR_BOOT
-echo "Extracting the ramdisk kernel modules and DTB"
-out=$extract_out/vendor_boot-out
-mkdir $out
-
-echo "Extracting at $out"
-unpackbootimg --boot_img $(get_path vendor_boot.img) --out $out --format mkbootimg
-
-echo "Done. Extracting the ramdisk"
-mkdir $out/ramdisk
-unlz4 $out/vendor_ramdisk00 $out/vendor_ramdisk
-cpio -i -F $out/vendor_ramdisk -D $out/ramdisk
-
-echo "Copying all ramdisk modules"
-for module in $(find $out/ramdisk -name "*.ko" -o -name "modules.load*" -o -name "modules.blocklist"); do
-	echo "Copying $(basename $module)"
-	cp $module ./modules/ramdisk/
-done
-
-# VENDOR_DLKM
-echo "Extracting the dlkm kernel modules"
-out=$extract_out/vendor_dlkm
-
-echo "Extracting at $out"
-fsck.erofs --extract="$out" $(get_path vendor_dlkm.img)
-
-echo "Done. Extracting the vendor dlkm"
-
-echo "Copying all dlkm modules"
-for module in $(find $out/lib -name "*.ko" -o -name "modules.load*" -o -name "modules.blocklist"); do
-	echo "Copying $(basename $module)"
-	cp $module ./modules/dlkm/
-done
+echo "Extracting vendor_boot image..."
+${SRC_ROOT}/system/tools/mkbootimg/unpack_bootimg.py \
+    --boot_img "${DUMP}/vendor_boot.img" \
+    --out "${TMP_DIR}/vendor_boot.out" > /dev/null
 
 # Extract DTBO and DTBs
 echo "Extracting DTBO and DTBs"
 
-curl -sSL "https://raw.githubusercontent.com/PabloCastellano/extract-dtb/master/extract_dtb/extract_dtb.py" > ${extract_out}/extract_dtb.py
+curl -sSL "https://raw.githubusercontent.com/PabloCastellano/extract-dtb/master/extract_dtb/extract_dtb.py" > ${TMP_DIR}/extract_dtb.py
 
-# Copy DTB
-python3 "${extract_out}/extract_dtb.py" "${extract_out}/vendor_boot-out/dtb" -o "${extract_out}/dtbs" > /dev/null
-find "${extract_out}/dtbs" -type f -name "*.dtb" \
-    -exec cp {} ./images/dtbs/ \; \
+python3 "${TMP_DIR}/extract_dtb.py" "${TMP_DIR}/vendor_boot.out/dtb" -o "${TMP_DIR}/dtbs" > /dev/null
+find "${TMP_DIR}/dtbs" -type f -name "*.dtb" \
+    -exec cp {} "${MY_DIR}/dtbs" \; \
     -exec printf "  - dtbs/" \; \
     -exec basename {} \;
 
-python3 "${extract_out}/extract_dtb.py" "${extract_out}/dtbo.img" -o "${extract_out}/dtbo" > /dev/null
+python3 "${TMP_DIR}/extract_dtb.py" "${DUMP}/dtbo.img" -o "${TMP_DIR}/dtbo" > /dev/null
 for DTBO_PANEL_PATCH in "${DTBO_PANEL_PATCHES[@]}"; do
     DTBO_PANEL_PATCH=(${DTBO_PANEL_PATCH//:/ })
     device=${DTBO_PANEL_PATCH[0]}
     panel=${DTBO_PANEL_PATCH[1]}
-    find "${extract_out}/dtbo" -type f -name "*${device}*.dtb" -exec grep -q "${panel}" {} \; \
+    find "${TMP_DIR}/dtbo" -type f -name "*${device}*.dtb" -exec grep -q "${panel}" {} \; \
         -exec bash -c '
             dt_node="$(fdtget -t s "{}" /__symbols__ "'${panel}'")";
             panel_height="$(fdtget -t i "{}" $dt_node "qcom,mdss-pan-physical-height-dimension")";
@@ -150,8 +99,30 @@ for DTBO_PANEL_PATCH in "${DTBO_PANEL_PATCHES[@]}"; do
         -exec basename {} \;
 done
 mkdtboimg \
-    create "./images/dtbo.img" --page_size=4096 "${extract_out}/dtbo/"*.dtb
+    create "./dtbs/dtbo.img" --page_size=4096 "${TMP_DIR}/dtbo/"*.dtb
 echo "    + Generated images/dtbo.img"
 
-rm -rf $extract_out
-echo "Extracted files successfully"
+### Modules
+# Cleanup / Preparation
+for MODULE_FOLDER in "${MODULE_FOLDERS[@]}"; do
+    rm -rf "${MY_DIR}/${MODULE_FOLDER}"
+    mkdir "${MY_DIR}/${MODULE_FOLDER}"
+done
+
+# Copy
+for MODULE_FOLDER in "${MODULE_FOLDERS[@]}"; do
+    MODULE_SRC="${DUMP}/${MODULE_FOLDER}"
+    if [ "${MODULE_FOLDER}" == "vendor_ramdisk" ]; then
+        lz4 -qd "${TMP_DIR}/vendor_boot.out/vendor_ramdisk00" "${TMP_DIR}/vendor_ramdisk.cpio"
+        7z x "${TMP_DIR}/vendor_ramdisk.cpio" -o"${TMP_DIR}/vendor_ramdisk" > /dev/null
+        MODULE_SRC="${TMP_DIR}/vendor_ramdisk"
+    fi
+    [ -d "${MODULE_SRC}" ] || break
+    find "${MODULE_SRC}/lib/modules" -type f \
+        -exec cp {} "${MY_DIR}/${MODULE_FOLDER}/" \; \
+        -exec printf "  - ${MODULE_FOLDER}/" \; \
+        -exec basename {} \;
+done
+
+# Clear temp dir
+rm -rf "${TMP_DIR}"
