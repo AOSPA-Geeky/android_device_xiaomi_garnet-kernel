@@ -38,6 +38,9 @@ while [ "${#}" -gt 0 ]; do
     shift
 done
 
+[ -f "${MY_DIR}/Module.symvers" ] || touch "${MY_DIR}/Module.symvers"
+[ -f "${MY_DIR}/System.map" ] || touch "${MY_DIR}/System.map"
+
 # Check if dump is specified and exists
 if [ -z "${DUMP}" ]; then
     echo "Please specify the dump!"
